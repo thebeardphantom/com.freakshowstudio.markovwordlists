@@ -1,80 +1,217 @@
-﻿
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text;
-
 using UnityEngine;
 using UnityEngine.Assertions;
-
 using Random = System.Random;
-
 
 namespace FreakshowStudio.MarkovWordLists.Runtime
 {
-    public class MarkovWordlist
-        : ScriptableObject,
-            ISerializationCallbackReceiver
+    public class MarkovWordlist : ScriptableObject, ISerializationCallbackReceiver
     {
+        #region Types
+
         [Serializable]
         private struct ChainElement
         {
-            [SerializeField]
-            public string key;
+            #region Properties
 
-            [SerializeField]
-            public string value;
+            [field: SerializeField]
+            public string Key { get; set; }
 
-            [SerializeField]
-            public double probability;
-        };
+            [field: SerializeField]
+            public string Value { get; set; }
 
-        #region Inspector Variables
-        #pragma warning disable 0649
+            [field: SerializeField]
+            public double Probability { get; set; }
 
-        [SerializeField]
-        private int _order;
+            #endregion
+        }
 
-        [SerializeField]
-        private char _startCharacter;
+        #endregion
 
-        [SerializeField]
-        private char _endCharacter;
+        #region Fields
 
-        [SerializeField]
-        private ChainElement[] _serializedChain;
+        private const char START_CHARACTER = (char)2;
 
-        #endregion // Inspector Variables
-        #pragma warning restore 0649
+        private const char END_CHARACTER = (char)3;
 
-        private Dictionary<string, Dictionary<string, double>> _chain =
-            new Dictionary<string, Dictionary<string, double>>();
+        private static readonly string _startCharacterStr = START_CHARACTER.ToString();
 
-        private Random _random = new Random();
+        private static readonly string _endCharacterStr = END_CHARACTER.ToString();
 
-        public static MarkovWordlist FromData(
-            int order,
-            IEnumerable<string> words,
-            char startCharacter,
-            char endCharacter)
+        private static readonly StringBuilder _stringBuilder = new();
+
+        private Dictionary<string, Dictionary<string, double>> _chain = new();
+
+        #endregion
+
+        #region Properties
+
+        [field: Min(1)]
+        [field: SerializeField]
+        private int Order { get; set; }
+
+        [field: HideInInspector]
+        [field: SerializeField]
+        [SuppressMessage("ReSharper", "Unity.RedundantHideInInspectorAttribute")]
+        private ChainElement[] SerializedChain { get; set; }
+
+        #endregion
+
+        #region Methods
+
+        public static MarkovWordlist FromData(int order, IEnumerable<string> words)
         {
+            Assert.IsTrue(order > 0, "order > 0");
             var asset = CreateInstance<MarkovWordlist>();
-
-            asset._order = order;
-            asset._startCharacter = startCharacter;
-            asset._endCharacter = endCharacter;
-
+            asset.Order = order;
             asset.GenerateChain(words);
-
             return asset;
         }
 
-        private void GenerateChain(
-            IEnumerable<string> words)
+        private static Dictionary<string, Dictionary<string, double>> NormalizeChain(
+            Dictionary<string, Dictionary<string, int>> chain)
+        {
+            var normalizedChain = new Dictionary<string, Dictionary<string, double>>();
+            foreach ((var key, var row) in chain)
+            {
+                var sum = 0;
+                foreach (var value in row.Values)
+                {
+                    sum += value;
+                }
+
+                normalizedChain[key] = row.ToDictionary(pair => pair.Key, pair => (double)pair.Value / sum);
+            }
+
+            return normalizedChain;
+        }
+
+        public string GenerateName(int lengthMin, int lengthMax)
+        {
+            return GenerateName(lengthMin, lengthMax, Environment.TickCount);
+        }
+
+        public string GenerateName(int lengthMin, int lengthMax, int randomSeed)
+        {
+            return GenerateName(lengthMin, lengthMax, new Random(randomSeed));
+        }
+
+        public string GenerateName(int lengthMin, int lengthMax, Random random)
+        {
+            try
+            {
+                var window = new string(START_CHARACTER, Order);
+                _stringBuilder.Append(window);
+
+                while (true)
+                {
+                    var next = PickNext(window, random);
+                    _stringBuilder.Append(next);
+
+                    var currentName = _stringBuilder.ToString();
+                    var currentLength = currentName.Length;
+
+                    var naturalLength = currentName.LastIndexOf(END_CHARACTER);
+                    var trimmedName = currentName.Replace(_startCharacterStr, "").Replace(_endCharacterStr, "");
+                    var trimmedLength = trimmedName.Length;
+                    if (trimmedLength >= lengthMax)
+                    {
+                        trimmedName = trimmedName[..lengthMax];
+                        return trimmedName;
+                    }
+
+                    if (naturalLength >= 0 && trimmedLength >= lengthMin)
+                    {
+                        return trimmedName;
+                    }
+
+                    if (naturalLength >= 0)
+                    {
+                        currentName = currentName[..(naturalLength - 1)];
+                        currentLength = currentName.Length;
+                        Assert.IsTrue(currentName.Length > 0);
+                    }
+
+                    var startIndex = currentLength - Order;
+                    var length = Order;
+                    if (startIndex < 0)
+                    {
+                        length += startIndex;
+                        if (length < 0)
+                        {
+                            length = 1;
+                        }
+
+                        startIndex = 0;
+                    }
+
+                    window = currentName.Substring(startIndex, length);
+                }
+            }
+            finally
+            {
+                _stringBuilder.Clear();
+            }
+        }
+
+        public void OnBeforeSerialize()
+        {
+            var flattenedChain = _chain.SelectMany(
+                    keys => keys.Value,
+                    (keys, values) => new ChainElement
+                    {
+                        Key = keys.Key,
+                        Value = values.Key,
+                        Probability = values.Value
+                    })
+                .ToArray();
+            SerializedChain = flattenedChain;
+        }
+
+        public void OnAfterDeserialize()
+        {
+            _chain = SerializedChain
+                .GroupBy(e => e.Key)
+                .ToDictionary(g => g.Key, g => g.ToDictionary(d => d.Value, d => d.Probability));
+        }
+
+        private string PickNext(string key, Random random)
+        {
+            var hasKey = _chain.ContainsKey(key);
+            while (!hasKey)
+            {
+                if (key.Length == 1)
+                {
+                    return _endCharacterStr;
+                }
+
+                key = key.Substring(1, key.Length - 1);
+                hasKey = _chain.ContainsKey(key);
+            }
+
+            var row = _chain[key];
+            var r = random.NextDouble();
+            var n = 0.0;
+
+            foreach (var kvp in row)
+            {
+                n += kvp.Value;
+                if (r < n)
+                {
+                    return kvp.Key;
+                }
+            }
+
+            return row.Last().Key;
+        }
+
+        private void GenerateChain(IEnumerable<string> words)
         {
             _chain.Clear();
-
-            string endString = new string(_endCharacter, 1);
 
             var chain = new Dictionary<string, Dictionary<string, int>>();
 
@@ -82,28 +219,17 @@ namespace FreakshowStudio.MarkovWordLists.Runtime
             {
                 var lowercaseWord = word.ToLowerInvariant();
 
-                for (int orderIdx = 0; orderIdx < _order; ++orderIdx)
+                for (var orderIndex = 0; orderIndex < Order; ++orderIndex)
                 {
-                    int orderLength = orderIdx + 1;
-                    string startString = new string(
-                        _startCharacter, orderLength);
-
-                    var paddedWord =
-                        $"{startString}{lowercaseWord}{endString}";
-
+                    var orderLength = orderIndex + 1;
+                    var startString = new string(START_CHARACTER, orderLength);
+                    var paddedWord = $"{startString}{lowercaseWord}{_endCharacterStr}";
                     var paddedWordLength = paddedWord.Length;
 
-                    for (int wordIdx = 0;
-                         wordIdx < paddedWordLength - orderLength;
-                         ++wordIdx)
+                    for (var wordIndex = 0; wordIndex < paddedWordLength - orderLength; wordIndex++)
                     {
-                        var key = paddedWord.Substring(
-                            wordIdx,
-                            orderLength);
-
-                        var value = paddedWord.Substring(
-                            wordIdx + orderLength,
-                            1);
+                        var key = paddedWord.Substring(wordIndex, orderLength);
+                        var value = paddedWord.Substring(wordIndex + orderLength, 1);
 
                         if (chain.ContainsKey(key))
                         {
@@ -128,159 +254,6 @@ namespace FreakshowStudio.MarkovWordLists.Runtime
             _chain = NormalizeChain(chain);
         }
 
-        private Dictionary<string, Dictionary<string, double>> NormalizeChain(
-            Dictionary<string,Dictionary<string,int>> chain)
-        {
-            var normalizedChain = 
-                new Dictionary<string, Dictionary<string, double>>();
-
-            foreach (var kvp in chain)
-            {
-                var key = kvp.Key;
-                var row = kvp.Value;
-                var sum = row.Values.Sum();
-
-                var newRow = row.ToDictionary(
-                    pair => pair.Key,
-                    pair => (double)pair.Value / sum);
-                    
-                normalizedChain[key] = newRow;
-            }
-
-            return normalizedChain;
-        }
-
-        public void SetRandomSeed(int seed)
-        {
-            _random = new Random(seed);
-        }
-
-        public string PickNext(string key)
-        {
-            bool hasKey = _chain.ContainsKey(key);
-            while (!hasKey)
-            {
-                if (key.Length == 1)
-                {
-                    return new string(_endCharacter, 1);
-                }
-
-                key = key.Substring(1, key.Length - 1);
-                hasKey = _chain.ContainsKey(key);
-            }
-
-            var row = _chain[key];
-            var r = _random.NextDouble();
-            var n = 0.0;
-
-            foreach (var kvp in row)
-            {
-                n += kvp.Value;
-                if (r < n)
-                {
-                    return kvp.Key;
-                }
-            }
-
-            return row.Last().Key;
-        }
-
-        public string GenerateName(
-            int minLength,
-            int maxLength)
-        {
-            StringBuilder sb = new StringBuilder();
-
-            var start = new string(_startCharacter, _order);
-            sb.Append(start);
-
-            while (true)
-            {
-                var next = PickNext(start);
-                sb.Append(next);
-
-                var currentName = sb.ToString();
-                var currentLength = currentName.Length;
-
-                var trimmedName = new []
-                {
-                    new string(_startCharacter, 1),
-                    new string(_endCharacter, 1),
-                }.Aggregate(
-                    currentName, (s1, s2) => 
-                        s1.Replace(s2, string.Empty));
-
-                var trimmedLength = trimmedName.Length;
-
-                var naturalLength = currentName.LastIndexOf(_endCharacter);
-
-                if (trimmedLength >= maxLength)
-                {
-                    trimmedName = trimmedName.Substring(
-                        0,
-                        maxLength);
-
-                    return trimmedName;
-                }
-
-                if (naturalLength >= 0 &&
-                    trimmedLength >= minLength)
-                {
-                    return trimmedName;
-                }
-
-                if (naturalLength >= 0)
-                {
-                    currentName = currentName.Substring(
-                        0,
-                        naturalLength - 1);
-                    currentLength = currentName.Length;
-
-                    Assert.IsTrue(currentName.Length > 0);
-                }
-
-                var startIdx = currentLength - _order;
-                var length = _order;
-                if (startIdx < 0)
-                {
-                    length += startIdx;
-                    if (length < 0)
-                    {
-                        length = 1;
-                    }
-
-                    startIdx = 0;
-                }
-
-                start = currentName.Substring(
-                    startIdx, length);
-            }
-        }
-
-        public void OnBeforeSerialize()
-        {
-            var flatChain =
-                from keys in _chain
-                from values in keys.Value
-                select new ChainElement()
-                {
-                    key = keys.Key,
-                    value = values.Key,
-                    probability = values.Value,
-                };
-
-            _serializedChain = flatChain.ToArray();
-        }
-
-        public void OnAfterDeserialize()
-        {
-            _chain = _serializedChain
-                .GroupBy(e => e.key)
-                .ToDictionary(
-                    g => g.Key,
-                    g => g.ToDictionary(
-                        d => d.value,
-                        d => d.probability));
-        }
+        #endregion
     }
 }

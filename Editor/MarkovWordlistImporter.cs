@@ -1,43 +1,31 @@
-
-using System.IO;
 using FreakshowStudio.MarkovWordLists.Runtime;
-using UnityEditor.Experimental.AssetImporters;
-
+using System.IO;
+using UnityEditor.AssetImporters;
 using UnityEngine;
-
 
 namespace FreakshowStudio.MarkovWordLists.Editor
 {
     [ScriptedImporter(1, "markov")]
     public class MarkovWordlistImporter : ScriptedImporter
     {
-        #region Inspector Variables
-        #pragma warning disable 0649
+        #region Properties
 
-        [SerializeField]
-        private int _order = 1;
+        [field: Min(1)]
+        [field: SerializeField]
+        private int Order { get; set; } = 4;
 
-        [SerializeField]
-        private char _startCharacter = '^';
+        #endregion
 
-        [SerializeField]
-        private char _endCharacter = '.';
-
-        #endregion // Inspector Variables
-        #pragma warning restore 0649
+        #region Methods
 
         public override void OnImportAsset(AssetImportContext ctx)
         {
             var words = File.ReadLines(ctx.assetPath);
-
-            var asset = MarkovWordlist.FromData(
-                _order,
-                words,
-                _startCharacter,
-                _endCharacter);
-
+            var asset = MarkovWordlist.FromData(Order, words);
             ctx.AddObjectToAsset("MarkovWordlist", asset);
             ctx.SetMainObject(asset);
         }
+
+        #endregion
     }
 }
